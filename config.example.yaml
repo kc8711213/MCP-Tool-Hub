@@ -1,0 +1,11 @@
+mock_mode: true
+default_tool_tags:
+  - mcp
+  - hub
+
+servers:
+  - id: demo-files
+    command: python
+    args: ["demo_server.py"]
+    env:
+      ENV: dev

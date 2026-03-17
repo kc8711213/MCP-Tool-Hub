@@ -1,0 +1,10 @@
+.packages/
+.venv/
+.data/
+.tmp/
+tests/.tmp/
+__pycache__/
+*.pyc
+pytest-cache-files-*/
+tmp*/
+config.yaml
