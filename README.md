@@ -1,38 +1,121 @@
 # MCP Tool Hub
 
-`MCP Tool Hub` is a middle-layer MCP server that exposes a small stable tool surface to an LLM while dynamically managing tools from multiple downstream MCP servers.
+`MCP Tool Hub` is a generic middle-layer MCP server that sits between an LLM client and multiple downstream MCP servers.
 
-## Goals
+Instead of exposing every downstream tool schema directly to the model, the hub keeps the assistant-facing surface small and stable:
 
-- Keep the assistant-facing tool schema small
-- Discover tools through search instead of dumping every schema into prompt context
-- Forward tool calls to downstream MCP servers through a single hub
+- `search_tools`
+- `invoke_tool`
+- `list_registered_tools`
 
-## Exposed Tools
+This reduces prompt bloat, keeps tool discovery targeted, and makes multi-server MCP setups easier to manage.
 
-- `search_tools(query: str, top_k: int = 5)`
-- `invoke_tool(tool_id: str, arguments: dict)`
-- `list_registered_tools(server_id: str | None = None)`
+## Why This Exists
 
-## Project Layout
+When an LLM client connects to many MCP servers at once, every tool schema can end up competing for prompt space.
+
+That creates a few practical problems:
+
+- larger system prompts
+- noisier tool selection
+- weaker reasoning efficiency
+- harder scaling as more MCP servers are added
+
+The hub addresses that by moving discovery and routing into a single MCP server.
+
+## How It Works
+
+The hub connects to downstream MCP servers over `stdio`, registers their tools internally, and exposes only three top-level tools to the client:
+
+- `search_tools(query, top_k=5)`
+  - Find the most relevant downstream tools for a request.
+- `invoke_tool(tool_id, arguments)`
+  - Call a downstream tool once the exact tool is known.
+- `list_registered_tools(server_id=None)`
+  - Inspect registered tools for debugging or explicit enumeration.
+
+Tool IDs are normalized as:
+
+```text
+{server_id}.{tool_name}
+```
+
+Example:
+
+```text
+local-rag.query_documents
+```
+
+## Search Strategy
+
+The built-in registry uses lightweight weighted matching across:
+
+- tool name
+- tags
+- description
+
+Default weights:
+
+- `name`: `+3`
+- `tags`: `+2`
+- `description`: `+1`
+
+`search_tools` also returns a `usage_instruction` field to guide the client toward `invoke_tool(...)`.
+
+## Project Structure
 
 ```text
 src/tool_hub/
-  config.py
+  __init__.py
   clients.py
+  config.py
   hub_server.py
   models.py
   real_client_v2.py
   registry.py
-tests/
+
 config.example.yaml
+config.yaml          # local-only, ignored by git
+run_hub.py
+pyproject.toml
+```
+
+## Installation
+
+```bash
+pip install -e .
+```
+
+For local testing:
+
+```bash
+pip install -e .[dev]
+```
+
+## Quick Start
+
+Start with the included example config:
+
+```bash
+mcp-tool-hub --config config.example.yaml
+```
+
+Or run through the lightweight wrapper:
+
+```bash
+python run_hub.py --config config.example.yaml
+```
+
+You can also provide the config path through an environment variable:
+
+```bash
+set TOOL_HUB_CONFIG=config.example.yaml
+python run_hub.py
 ```
 
 ## Configuration
 
-Set `TOOL_HUB_CONFIG` to a YAML file, or pass `--config` to the CLI.
-
-Example:
+Example config:
 
 ```yaml
 mock_mode: true
@@ -48,30 +131,50 @@ servers:
       ENV: dev
 ```
 
-The shipped example runs in `mock_mode` so the hub can be exercised without a real downstream MCP server. Set `mock_mode: false` for real stdio-backed MCP sessions.
+Notes:
 
-The hub intentionally does not set a custom `cwd` for downstream processes. Child servers inherit the parent working directory so relative paths remain consistent for tools that expect them.
+- `mock_mode: true` is useful for local smoke testing.
+- `mock_mode: false` enables real downstream MCP connections.
+- downstream processes intentionally inherit the hub working directory unless you explicitly change that behavior in code
 
-## Install
+## Real-World Validation
 
-```bash
-pip install -e .
-```
+This project has already been exercised against a local RAG-style downstream MCP server:
 
-For tests:
+- downstream server launched through the hub
+- tools discovered and registered successfully
+- local document ingestion executed through `invoke_tool`
+- document queries returned results through the hub
 
-```bash
-pip install -e .[dev]
-```
+That validates the core design: the hub is not limited to mocks and can route real MCP tool workflows end to end.
 
-## Run
+## Recommended Client Behavior
 
-```bash
-mcp-tool-hub --config config.example.yaml
-```
+For best results, clients should follow this pattern:
 
-## Notes
+1. Use `search_tools` when the correct downstream tool is not yet known.
+2. Use `invoke_tool` once the exact tool has been identified.
+3. Use `list_registered_tools` for inspection, debugging, or explicit user requests.
 
-- `search_tools` returns `usage_instruction` so the caller knows how to continue with `invoke_tool`.
-- `tool_id` format is `{server_id}.{tool_name}`.
-- Real downstream sessions are managed behind a small client abstraction. A mock mode is included for local testing.
+This keeps the hub generic and avoids hard-coding behavior for any single MCP domain such as RAG, browser tools, or developer utilities.
+
+## Development Notes
+
+- the real client bridge uses a dedicated event loop thread and `asyncio.run_coroutine_threadsafe(...)`
+- downstream `stderr` is buffered so startup noise stays out of normal logs, while error output can still be surfaced on failures
+- pytest temp output is pinned to `tests/.tmp` to avoid polluting the repo root
+
+## Status
+
+Current state:
+
+- core hub runtime implemented
+- mock mode implemented
+- real stdio downstream client implemented
+- config loading implemented
+- registry search implemented
+- local tests included
+
+## License
+
+No license has been added yet.
